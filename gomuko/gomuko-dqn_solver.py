@@ -1,5 +1,4 @@
 from typing import List
-import importlib.util
 import os
 import sys
 
@@ -7,9 +6,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tqdm import trange
-from open_spiel.python.games.tic_tac_toe import TicTacToeGame, TicTacToeState
+from game.gomuko import GomukoGame
 import numpy as np
-import random
 from open_spiel.python import rl_environment
 from open_spiel.python.algorithms import random_agent
 from open_spiel.python.algorithms import tabular_qlearner
@@ -23,34 +21,6 @@ logging.basicConfig(
     filemode="a",
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
-
-
-def pretty_board(time_step: rl_environment.TimeStep) -> np.ndarray:
-    """Returns the board in `time_step` in a human readable format."""
-    info_state = time_step.observations["info_state"][0]
-    x_locations = np.nonzero(info_state[9:18])[0]
-    o_locations = np.nonzero(info_state[18:])[0]
-    board = np.full(3 * 3, ".")
-    board[x_locations] = "X"
-    board[o_locations] = "0"
-    board = np.reshape(board, (3, 3))
-    return board
-
-
-def command_line_action(time_step: rl_environment.TimeStep) -> int:
-    """Gets a valid action from the user on the command line."""
-    current_player = time_step.observations["current_player"]
-    legal_actions = time_step.observations["legal_actions"][current_player]
-    action = -1
-    while action not in legal_actions:
-        print("Choose an action from {}:".format(legal_actions))
-        sys.stdout.flush()
-        action_str = input()
-        try:
-            action = int(action_str)
-        except ValueError:
-            continue
-    return action
 
 
 def eval_against_random_bots(
@@ -78,33 +48,47 @@ def eval_against_random_bots(
 
 
 def main():
-    tictactoe = TicTacToeGame()
+    gomuko = GomukoGame()
 
-    env = rl_environment.Environment(tictactoe)
+    env = rl_environment.Environment(gomuko)
     state_size = env.observation_spec()["info_state"][0]
     num_actions = env.action_spec()["num_actions"]
 
     num_players = 2
 
-    hidden_layers_sizes = [32, 32]
+    hidden_layers_sizes = [512, 512]
     replay_buffer_capacity = int(1e4)
-    train_episodes = 10000
+    train_episodes = 200000
     loss_report_interval = 1000
+    save_model_interval = 5000
 
-    dqn_agent = DQN(
-        player_id=0,
-        state_representation_size=state_size,
-        num_actions=num_actions,
-        hidden_layers_sizes=hidden_layers_sizes,
-        replay_buffer_capacity=replay_buffer_capacity,
-    )
-
-    tabular_q_agent = tabular_qlearner.QLearner(player_id=1, num_actions=num_actions)
-    agents = [dqn_agent, tabular_q_agent]
+    agents = [
+        DQN(
+            player_id=0,
+            state_representation_size=state_size,
+            num_actions=num_actions,
+            hidden_layers_sizes=hidden_layers_sizes,
+            replay_buffer_capacity=replay_buffer_capacity,
+            device="cuda",
+        ),
+        DQN(
+            player_id=1,
+            state_representation_size=state_size,
+            num_actions=num_actions,
+            hidden_layers_sizes=hidden_layers_sizes,
+            replay_buffer_capacity=replay_buffer_capacity,
+            device="cuda",
+        ),
+    ]
 
     for ep in trange(train_episodes):
         if ep and ep % loss_report_interval == 0:
-            logging.info("[%s/%s] DQN loss: %s", ep, train_episodes, agents[0].loss)
+            logging.info("[%s/%s] DQN 1 loss: %s", ep, train_episodes, agents[0].loss)
+            logging.info("[%s/%s] DQN 2 loss: %s", ep, train_episodes, agents[1].loss)
+
+        if ep and ep % save_model_interval == 0:
+            agents[0].save(f"gomuko/checkpoints/agent_{0}_checkpoint_{ep}.pt")
+            agents[1].save(f"gomuko/checkpoints/agent_{1}_checkpoint_{ep}.pt")
 
         time_step = env.reset()
 
@@ -123,6 +107,10 @@ def main():
         for idx in range(num_players)
     ]
     r_mean = eval_against_random_bots(env, agents, random_agents, 1000)
+
+    for i in range(agents):
+        agents[i].save(f"gomuko/agent_{i}_checkpoint.pt")
+
     logging.info("Mean episode rewards: %s", r_mean)
 
 

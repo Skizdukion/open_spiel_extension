@@ -390,7 +390,7 @@ class DQN(rl_agent.AbstractAgent):
         Returns:
           A `rl_agent.StepOutput` containing the action probs and chosen action.
         """
-        print("DQN step ----")
+        # print("DQN step ----")
         if is_evaluation:
             return self.select_action(time_step, True)
 
@@ -633,8 +633,8 @@ class DQN(rl_agent.AbstractAgent):
             Defaults to True.
         """
         checkpoint = torch.load(data_path, weights_only=True, map_location=self._device)
-        self._q_network.load_state_dict(checkpoint["model_state_dict"])
-        self._target_q_network.load_state_dict(checkpoint["model_state_dict"])
+        self._q_network.load_state_dict(checkpoint["model"])
+        self._target_q_network.load_state_dict(checkpoint["model"])
 
         if load_optimiser:
             self._optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
