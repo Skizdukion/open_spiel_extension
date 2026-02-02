@@ -2,7 +2,7 @@ from typing import List
 import os
 import sys
 
-# Add parent directory to path so we can import from algorithims
+# Add parent directory to path so we can import from algorithms
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tqdm import trange
@@ -13,7 +13,7 @@ from open_spiel.python.algorithms import random_agent
 from open_spiel.python.algorithms import tabular_qlearner
 import logging
 
-from algorithims.dqn import DQN
+from algorithms.dqn import DQN
 
 logging.basicConfig(
     level=logging.INFO,
@@ -95,7 +95,7 @@ while True:
     time_step = env.reset()
     while not time_step.last():
         player_id = time_step.observations["current_player"]
-    
+
         if player_id == human_player:
             # agent_out = dqn_agent.step(time_step, is_evaluation=True)
             # logging.info("\n%s", agent_out.probs.reshape((7, 7)))

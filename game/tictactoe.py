@@ -112,9 +112,8 @@ class TicTacToeState(pyspiel.State):
             self._is_terminal = True
             self._player0_score = 1.0 if self._cur_player == 0 else -1.0
         elif all(self.board.ravel() != "."):
-            # Draw: both players get +0.2 (incentivize draws over losses)
             self._is_terminal = True
-            self._player0_score = 0.2
+            self._player0_score = 0
         else:
             self._cur_player = 1 - self._cur_player
 

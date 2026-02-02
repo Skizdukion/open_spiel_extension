@@ -3,7 +3,7 @@ import importlib.util
 import os
 import sys
 
-# Add parent directory to path so we can import from algorithims
+# Add parent directory to path so we can import from algorithms
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tqdm import trange
@@ -15,13 +15,15 @@ from open_spiel.python.algorithms import random_agent
 from open_spiel.python.algorithms import tabular_qlearner
 import logging
 
-from algorithims.dqn import DQN
+from algorithms.dqn import DQN
 
 logging.basicConfig(
     level=logging.INFO,
-    filename="app.log",
-    filemode="a",
     format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[
+        logging.FileHandler("app.log", mode="a"),
+        logging.StreamHandler(),  # Console output
+    ],
 )
 
 
@@ -88,23 +90,46 @@ def main():
 
     hidden_layers_sizes = [32, 32]
     replay_buffer_capacity = int(1e4)
-    train_episodes = 10000
+    train_episodes = 100000
     loss_report_interval = 1000
 
-    dqn_agent = DQN(
-        player_id=0,
-        state_representation_size=state_size,
-        num_actions=num_actions,
-        hidden_layers_sizes=hidden_layers_sizes,
-        replay_buffer_capacity=replay_buffer_capacity,
-    )
-
-    tabular_q_agent = tabular_qlearner.QLearner(player_id=1, num_actions=num_actions)
-    agents = [dqn_agent, tabular_q_agent]
+    agents = [
+        DQN(
+            player_id=0,
+            state_representation_size=state_size,
+            num_actions=num_actions,
+            hidden_layers_sizes=hidden_layers_sizes,
+            replay_buffer_capacity=replay_buffer_capacity,
+        ),
+        DQN(
+            player_id=1,
+            state_representation_size=state_size,
+            num_actions=num_actions,
+            hidden_layers_sizes=hidden_layers_sizes,
+            replay_buffer_capacity=replay_buffer_capacity,
+        ),
+    ]
 
     for ep in trange(train_episodes):
         if ep and ep % loss_report_interval == 0:
-            logging.info("[%s/%s] DQN loss: %s", ep, train_episodes, agents[0].loss)
+            q1 = agents[0].q_values
+            q2 = agents[1].q_values
+            q1_mean = q1.mean().item() if q1 is not None else 0
+            q2_mean = q2.mean().item() if q2 is not None else 0
+            logging.info(
+                "[%s/%s] DQN 1 loss: %s, Q-mean: %.4f",
+                ep,
+                train_episodes,
+                agents[0].loss,
+                q1_mean,
+            )
+            logging.info(
+                "[%s/%s] DQN 2 loss: %s, Q-mean: %.4f",
+                ep,
+                train_episodes,
+                agents[1].loss,
+                q2_mean,
+            )
 
         time_step = env.reset()
 
@@ -118,12 +143,38 @@ def main():
         for agent in agents:
             agent.step(time_step)
 
+    # Final Evaluation
+    print("\n" + "=" * 60)
+    print("FINAL EVALUATION")
+    print("=" * 60)
+
     random_agents = [
         random_agent.RandomAgent(player_id=idx, num_actions=num_actions)
         for idx in range(num_players)
     ]
     r_mean = eval_against_random_bots(env, agents, random_agents, 1000)
+    print(f"\nWin rate vs random: P0={r_mean[0]:.3f}, P1={r_mean[1]:.3f}")
     logging.info("Mean episode rewards: %s", r_mean)
+
+    # Stochastic evaluation (sample from action probabilities)
+    print("\nDQN vs DQN (1000 games) Stochastic:")
+    p0_wins = p1_wins = draws = 0
+    for _ in range(1000):
+        time_step = env.reset()
+        while not time_step.last():
+            player_id = time_step.observations["current_player"]
+            # Get action probs and sample (stochastic)
+            agent_output = agents[player_id].step(time_step, is_evaluation=True)
+            # Sample from probs instead of using argmax action
+            action = np.random.choice(len(agent_output.probs), p=agent_output.probs)
+            time_step = env.step([action])
+        if time_step.rewards[0] > 0:
+            p0_wins += 1
+        elif time_step.rewards[1] > 0:
+            p1_wins += 1
+        else:
+            draws += 1
+    print(f"P0 wins: {p0_wins}, P1 wins: {p1_wins}, Draws: {draws}")
 
 
 main()

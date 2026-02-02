@@ -2,7 +2,7 @@ from typing import List
 import os
 import sys
 
-# Add parent directory to path so we can import from algorithims
+# Add parent directory to path so we can import from algorithms
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tqdm import trange
@@ -13,13 +13,15 @@ from open_spiel.python.algorithms import random_agent
 from open_spiel.python.algorithms import tabular_qlearner
 import logging
 
-from algorithims.dqn import DQN
+from algorithms.dqn import DQN
 
 logging.basicConfig(
     level=logging.INFO,
-    filename="app.log",
-    filemode="a",
     format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[
+        logging.FileHandler("app.log", mode="a"),
+        logging.StreamHandler(),  # Console output
+    ],
 )
 
 
@@ -56,11 +58,12 @@ def main():
 
     num_players = 2
 
-    hidden_layers_sizes = [512, 512]
-    replay_buffer_capacity = int(1e4)
+    hidden_layers_sizes = [256, 256]
+    replay_buffer_capacity = int(1e6)
     train_episodes = 200000
     loss_report_interval = 1000
-    save_model_interval = 5000
+    save_model_interval = 10000
+    eval_interval = 10000
 
     agents = [
         DQN(
@@ -69,6 +72,10 @@ def main():
             num_actions=num_actions,
             hidden_layers_sizes=hidden_layers_sizes,
             replay_buffer_capacity=replay_buffer_capacity,
+            batch_size=1024,
+            gradient_clipping=1.0,
+            learning_rate=0.001,
+            learn_every=100,
             device="cuda",
         ),
         DQN(
@@ -77,18 +84,71 @@ def main():
             num_actions=num_actions,
             hidden_layers_sizes=hidden_layers_sizes,
             replay_buffer_capacity=replay_buffer_capacity,
+            batch_size=1024,
+            gradient_clipping=1.0,
+            learning_rate=0.001,
+            learn_every=100,
             device="cuda",
         ),
     ]
 
+    random_agents = [
+        random_agent.RandomAgent(player_id=idx, num_actions=num_actions)
+        for idx in range(num_players)
+    ]
+
+    best_winrate = 0.0
+
     for ep in trange(train_episodes):
+        # Periodic evaluation
+        if ep and ep % eval_interval == 0:
+            # Agent vs Random
+            r_mean = eval_against_random_bots(env, agents, random_agents, 100)
+            avg_winrate = (r_mean[0] + r_mean[1]) / 2
+            improved = " (NEW BEST!)" if avg_winrate > best_winrate else ""
+            if avg_winrate > best_winrate:
+                best_winrate = avg_winrate
+
+            # Agent vs Agent (stochastic)
+            p0_wins = p1_wins = draws = 0
+            for _ in range(100):
+                time_step = env.reset()
+                while not time_step.last():
+                    player_id = time_step.observations["current_player"]
+                    agent_output = agents[player_id].step(time_step, is_evaluation=True)
+                    action = np.random.choice(
+                        len(agent_output.probs), p=agent_output.probs
+                    )
+                    time_step = env.step([action])
+                if time_step.rewards[0] > 0:
+                    p0_wins += 1
+                elif time_step.rewards[1] > 0:
+                    p1_wins += 1
+                else:
+                    draws += 1
+
+            logging.info(
+                f"\n[Ep {ep}] WR vs Random: P0={r_mean[0]:.3f}, P1={r_mean[1]:.3f}, Avg={avg_winrate:.3f}{improved}"
+            )
+            logging.info(f"  DQN vs DQN: P0={p0_wins}, P1={p1_wins}, Draws={draws}")
+            logging.info(
+                "[%s] WR vs Random: P0=%.3f, P1=%.3f", ep, r_mean[0], r_mean[1]
+            )
+
         if ep and ep % loss_report_interval == 0:
-            logging.info("[%s/%s] DQN 1 loss: %s", ep, train_episodes, agents[0].loss)
-            logging.info("[%s/%s] DQN 2 loss: %s", ep, train_episodes, agents[1].loss)
+            # Log loss and Q-value magnitude
+            q1 = agents[0].q_values
+            q2 = agents[1].q_values
+            q1_mean = q1.mean().item() if q1 is not None else 0
+            q2_mean = q2.mean().item() if q2 is not None else 0
+            logging.info(
+                f"  Loss: P0={agents[0].loss:.4f}, P1={agents[1].loss:.4f} | Q-mean: P0={q1_mean:.4f}, P1={q2_mean:.4f}"
+            )
 
         if ep and ep % save_model_interval == 0:
             agents[0].save(f"gomuko/checkpoints/agent_{0}_checkpoint_{ep}.pt")
             agents[1].save(f"gomuko/checkpoints/agent_{1}_checkpoint_{ep}.pt")
+            logging.info(f"  Models saved at episode {ep}")
 
         time_step = env.reset()
 
@@ -102,75 +162,5 @@ def main():
         for agent in agents:
             agent.step(time_step)
 
-    random_agents = [
-        random_agent.RandomAgent(player_id=idx, num_actions=num_actions)
-        for idx in range(num_players)
-    ]
-    r_mean = eval_against_random_bots(env, agents, random_agents, 1000)
-
-    for i in range(agents):
-        agents[i].save(f"gomuko/agent_{i}_checkpoint.pt")
-
-    logging.info("Mean episode rewards: %s", r_mean)
-
 
 main()
-
-# tictactoe = TicTacToeGame()
-
-# state = tictactoe.new_initial_state()
-
-# # Print the initial state
-# print(str(state))
-
-# while not state.is_terminal():
-#     # The state can be three different types: chance node,
-#     # simultaneous node, or decision node
-#     if state.is_chance_node():
-#         # Chance node: sample an outcome
-#         outcomes = state.chance_outcomes()
-#         num_actions = len(outcomes)
-#         print("Chance node, got " + str(num_actions) + " outcomes")
-#         action_list, prob_list = zip(*outcomes)
-#         action = np.random.choice(action_list, p=prob_list)
-#         print(
-#             "Sampled outcome: ", state.action_to_string(state.current_player(), action)
-#         )
-#         state.apply_action(action)
-
-#     elif state.is_simultaneous_node():
-#         # Simultaneous node: sample actions for all players.
-
-#         def random_choice(a):
-#             return np.random.choice(a) if a else [0]
-
-#         chosen_actions = [
-#             random_choice(state.legal_actions(pid))
-#             for pid in range(tictactoe.num_players())
-#         ]
-#         print(
-#             "Chosen actions: ",
-#             [
-#                 state.action_to_string(pid, action)
-#                 for pid, action in enumerate(chosen_actions)
-#             ],
-#         )
-#         state.apply_actions(chosen_actions)
-#     else:
-#         # Decision node: sample action for the single current player
-#         action = random.choice(state.legal_actions(state.current_player()))
-#         action_string = state.action_to_string(state.current_player(), action)
-#         print(
-#             "Player ",
-#             state.current_player(),
-#             ", randomly sampled action: ",
-#             action_string,
-#         )
-#         state.apply_action(action)
-
-#     print(str(state))
-
-# # Game is now done. Print utilities for each player
-# returns = state.returns()
-# for pid in range(tictactoe.num_players()):
-#     print("Utility for player {} is {}".format(pid, returns[pid]))
