@@ -1,4 +1,4 @@
-from open_spiel.python.games.tic_tac_toe import TicTacToeGame, TicTacToeState
+from game.tictactoe import TicTacToeGame, TicTacToeState
 import numpy as np
 import random
 

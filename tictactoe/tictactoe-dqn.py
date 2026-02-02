@@ -7,7 +7,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tqdm import trange
-from open_spiel.python.games.tic_tac_toe import TicTacToeGame, TicTacToeState
+from game.tictactoe import TicTacToeGame, TicTacToeState
 import numpy as np
 import random
 from open_spiel.python import rl_environment

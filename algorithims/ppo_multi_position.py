@@ -12,16 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""An implementation of PPO.
+"""Multi-position PPO implementation.
 
-Note: code adapted (with permission) from
-https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/ppo.py and
-https://github.com/vwxyzjn/ppo-implementation-details/blob/main/ppo_atari.py.
-
-Currently only supports the single-agent case.
+Supports training a single network to play as multiple player positions.
+The agent automatically detects current player from time_step and uses
+the appropriate perspective for observation extraction.
 """
 
 import time
+from typing import List
 
 import numpy as np
 import torch
@@ -43,7 +42,6 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 class CategoricalMasked(Categorical):
     """A masked categorical."""
 
-    # pylint: disable=dangerous-default-value
     def __init__(
         self, probs=None, logits=None, validate_args=None, masks=[], mask_value=None
     ):
@@ -97,17 +95,7 @@ class PPOAgent(nn.Module):
 
 
 def legal_actions_to_mask(legal_actions_list, num_actions):
-    """Converts a list of legal actions to a mask.
-
-    The mask has size num actions with a 1 in a legal positions.
-
-    Args:
-      legal_actions_list: the list of legal actions
-      num_actions: number of actions (width of mask)
-
-    Returns:
-      legal actions mask.
-    """
+    """Converts a list of legal actions to a mask."""
     legal_actions_mask = torch.zeros(
         (len(legal_actions_list), num_actions), dtype=torch.bool
     )
@@ -116,15 +104,20 @@ def legal_actions_to_mask(legal_actions_list, num_actions):
     return legal_actions_mask
 
 
-class PPO(nn.Module):
-    """PPO Agent implementation in PyTorch.
+class PPOMultiPosition(nn.Module):
+    """PPO Agent that can play as multiple player positions.
 
-    See open_spiel/python/examples/ppo_example.py for an usage example.
+    Uses a single shared network for all positions. Automatically detects
+    current player from time_step and uses correct observation perspective.
 
-    Note that PPO runs multiple environments concurrently on each step (see
-    open_spiel/python/vector_env.py). In practice, this tends to improve PPO's
-    performance. The number of parallel environments is controlled by the
-    num_envs argument.
+    When use_canonical_form=True, observations are transformed so all players
+    see the game from the same perspective ("my pieces" vs "opponent pieces").
+    This is essential for shared networks to learn effectively.
+
+    Args:
+        player_ids: List of player IDs this agent handles, e.g., [0, 1] for both players
+        canonical_obs_fn: Optional function(obs, player_id) -> canonical_obs to transform
+                         observations to canonical form. If None, uses raw observations.
     """
 
     def __init__(
@@ -132,7 +125,7 @@ class PPO(nn.Module):
         input_shape,
         num_actions,
         num_players,
-        player_id=0,
+        player_ids: List[int],  # e.g., [0, 1] for both players
         num_envs=1,
         steps_per_batch=128,
         num_minibatches=4,
@@ -149,16 +142,18 @@ class PPO(nn.Module):
         max_grad_norm=0.5,
         target_kl=None,
         device="cpu",
-        writer=None,  # Tensorboard SummaryWriter
+        writer=None,
         agent_fn=PPOAgent,
+        canonical_obs_fn=None,  # Function(obs, player_id) -> canonical_obs
     ):
         super().__init__()
 
         self.input_shape = input_shape
         self.num_actions = num_actions
         self.num_players = num_players
-        self.player_id = player_id
+        self.player_ids = list(player_ids)
         self.device = device
+        self.canonical_obs_fn = canonical_obs_fn
 
         # Training settings
         self.num_envs = num_envs
@@ -184,28 +179,65 @@ class PPO(nn.Module):
         # Logging
         self.writer = writer
 
-        # Initialize networks
+        # Shared network for all positions
         self.network = agent_fn(self.num_actions, self.input_shape, device).to(device)
         self.optimizer = optim.Adam(self.parameters(), lr=self.learning_rate, eps=1e-5)
 
-        # Initialize training buffers
-        self.legal_actions_mask = torch.zeros(
-            (self.steps_per_batch, self.num_envs, self.num_actions), dtype=torch.bool
-        ).to(device)
-        self.obs = torch.zeros(
-            (self.steps_per_batch, self.num_envs) + self.input_shape
-        ).to(device)
-        self.actions = torch.zeros((self.steps_per_batch, self.num_envs)).to(device)
-        self.logprobs = torch.zeros((self.steps_per_batch, self.num_envs)).to(device)
-        self.rewards = torch.zeros((self.steps_per_batch, self.num_envs)).to(device)
-        self.dones = torch.zeros((self.steps_per_batch, self.num_envs)).to(device)
-        self.values = torch.zeros((self.steps_per_batch, self.num_envs)).to(device)
+        # Initialize training buffers - SEPARATE for each player position
+        self._init_buffers()
 
-        # Initialize counters
-        self.cur_batch_idx = 0
+        # Counters per position
+        self.cur_batch_idx = {pid: 0 for pid in self.player_ids}
         self.total_steps_done = 0
         self.updates_done = 0
         self.start_time = time.time()
+
+    def _init_buffers(self):
+        """Initialize separate experience buffers for each player position."""
+        self.legal_actions_mask = {
+            pid: torch.zeros(
+                (self.steps_per_batch, self.num_envs, self.num_actions),
+                dtype=torch.bool,
+            ).to(self.device)
+            for pid in self.player_ids
+        }
+        self.obs = {
+            pid: torch.zeros(
+                (self.steps_per_batch, self.num_envs) + self.input_shape
+            ).to(self.device)
+            for pid in self.player_ids
+        }
+        self.actions = {
+            pid: torch.zeros((self.steps_per_batch, self.num_envs)).to(self.device)
+            for pid in self.player_ids
+        }
+        self.logprobs = {
+            pid: torch.zeros((self.steps_per_batch, self.num_envs)).to(self.device)
+            for pid in self.player_ids
+        }
+        self.rewards = {
+            pid: torch.zeros((self.steps_per_batch, self.num_envs)).to(self.device)
+            for pid in self.player_ids
+        }
+        self.dones = {
+            pid: torch.zeros((self.steps_per_batch, self.num_envs)).to(self.device)
+            for pid in self.player_ids
+        }
+        self.values = {
+            pid: torch.zeros((self.steps_per_batch, self.num_envs)).to(self.device)
+            for pid in self.player_ids
+        }
+
+    def _get_current_player(self, time_step) -> int:
+        """Extract current player from time_step."""
+        if isinstance(time_step, list):
+            return time_step[0].observations["current_player"]
+        return time_step.observations["current_player"]
+
+    def should_act(self, time_step) -> bool:
+        """Check if this agent should act for the current player."""
+        current_player = self._get_current_player(time_step)
+        return current_player in self.player_ids
 
     def get_value(self, x):
         return self.network.get_value(x)
@@ -213,21 +245,46 @@ class PPO(nn.Module):
     def get_action_and_value(self, x, legal_actions_mask=None, action=None):
         return self.network.get_action_and_value(x, legal_actions_mask, action)
 
+    def _to_canonical_obs(self, obs: np.ndarray, player_id: int) -> np.ndarray:
+        """Transform observation to canonical form using the provided function.
+
+        If canonical_obs_fn was provided at init, applies it to transform the
+        observation. Otherwise returns the observation unchanged.
+
+        Args:
+            obs: Raw observation array
+            player_id: Current player (0 or 1)
+
+        Returns:
+            Canonical observation (same shape)
+        """
+        if self.canonical_obs_fn is None:
+            return obs
+        return self.canonical_obs_fn(obs, player_id)
+
     def step(self, time_step, is_evaluation=False):
+        """Take action, automatically using current player's perspective."""
+        # Auto-detect current player
+        player_id = self._get_current_player(time_step)
+
+        if player_id not in self.player_ids:
+            raise ValueError(
+                f"Current player {player_id} not in player_ids {self.player_ids}"
+            )
+
         if is_evaluation:
             with torch.no_grad():
                 legal_actions_mask = legal_actions_to_mask(
-                    [
-                        ts.observations["legal_actions"][self.player_id]
-                        for ts in time_step
-                    ],
+                    [ts.observations["legal_actions"][player_id] for ts in time_step],
                     self.num_actions,
                 ).to(self.device)
                 obs = torch.Tensor(
                     np.array(
                         [
                             np.reshape(
-                                ts.observations["info_state"][self.player_id],
+                                self._to_canonical_obs(
+                                    ts.observations["info_state"][player_id], player_id
+                                ),
                                 self.input_shape,
                             )
                             for ts in time_step
@@ -243,12 +300,13 @@ class PPO(nn.Module):
                 ]
         else:
             with torch.no_grad():
-                # act
                 obs = torch.Tensor(
                     np.array(
                         [
                             np.reshape(
-                                ts.observations["info_state"][self.player_id],
+                                self._to_canonical_obs(
+                                    ts.observations["info_state"][player_id], player_id
+                                ),
                                 self.input_shape,
                             )
                             for ts in time_step
@@ -256,91 +314,123 @@ class PPO(nn.Module):
                     )
                 ).to(self.device)
                 legal_actions_mask = legal_actions_to_mask(
-                    [
-                        ts.observations["legal_actions"][self.player_id]
-                        for ts in time_step
-                    ],
+                    [ts.observations["legal_actions"][player_id] for ts in time_step],
                     self.num_actions,
                 ).to(self.device)
                 action, logprob, _, value, probs = self.get_action_and_value(
                     obs, legal_actions_mask=legal_actions_mask
                 )
 
-                # store
-                self.legal_actions_mask[self.cur_batch_idx] = legal_actions_mask
-                self.obs[self.cur_batch_idx] = obs
-                self.actions[self.cur_batch_idx] = action
-                self.logprobs[self.cur_batch_idx] = logprob
-                self.values[self.cur_batch_idx] = value.flatten()
+                # Store in this player's buffers
+                idx = self.cur_batch_idx[player_id]
+                self.legal_actions_mask[player_id][idx] = legal_actions_mask
+                self.obs[player_id][idx] = obs
+                self.actions[player_id][idx] = action
+                self.logprobs[player_id][idx] = logprob
+                self.values[player_id][idx] = value.flatten()
 
-                agent_output = [
+                return [
                     StepOutput(action=a.item(), probs=p)
                     for (a, p) in zip(action, probs)
                 ]
-                return agent_output
 
-    def post_step(self, reward, done):
-        self.rewards[self.cur_batch_idx] = torch.tensor(reward).to(self.device).view(-1)
-        self.dones[self.cur_batch_idx] = torch.tensor(done).to(self.device).view(-1)
+    def post_step(self, time_step, reward, done):
+        """Store reward/done for current player. Call AFTER step()."""
+        player_id = self._get_current_player(time_step)
+
+        if player_id not in self.player_ids:
+            return
+
+        idx = self.cur_batch_idx[player_id]
+        self.rewards[player_id][idx] = torch.tensor(reward).to(self.device).view(-1)
+        self.dones[player_id][idx] = torch.tensor(done).to(self.device).view(-1)
 
         self.total_steps_done += self.num_envs
-        self.cur_batch_idx += 1
+        self.cur_batch_idx[player_id] += 1
 
-    def learn(self, time_step):
-        next_obs = torch.Tensor(
-            np.array(
-                [
-                    np.reshape(
-                        ts.observations["info_state"][self.player_id], self.input_shape
-                    )
-                    for ts in time_step
-                ]
-            )
-        ).to(self.device)
+    def should_learn(self, player_id: int = None) -> bool:
+        """Check if any player (or specific player) has full batch."""
+        if player_id is not None:
+            return self.cur_batch_idx[player_id] >= self.steps_per_batch
+        return any(
+            self.cur_batch_idx[pid] >= self.steps_per_batch for pid in self.player_ids
+        )
+
+    def learn(self, time_step=None):
+        """Learn from all player positions that have full batches."""
+        for player_id in self.player_ids:
+            if self.cur_batch_idx[player_id] >= self.steps_per_batch:
+                self._learn_for_player(player_id, time_step)
+
+    def _learn_for_player(self, player_id: int, time_step=None):
+        """Perform PPO update for a specific player's experiences."""
+        # Get next observation for bootstrap
+        if time_step is not None:
+            next_obs = torch.Tensor(
+                np.array(
+                    [
+                        np.reshape(
+                            self._to_canonical_obs(
+                                ts.observations["info_state"][player_id], player_id
+                            ),
+                            self.input_shape,
+                        )
+                        for ts in time_step
+                    ]
+                )
+            ).to(self.device)
+        else:
+            # Use last observation as next_obs (terminal state approximation)
+            next_obs = self.obs[player_id][self.steps_per_batch - 1]
+
+        # Get buffers for this player
+        obs = self.obs[player_id]
+        actions = self.actions[player_id]
+        logprobs = self.logprobs[player_id]
+        rewards = self.rewards[player_id]
+        dones = self.dones[player_id]
+        values = self.values[player_id]
+        legal_actions_masks = self.legal_actions_mask[player_id]
 
         # bootstrap value if not done
         with torch.no_grad():
             next_value = self.get_value(next_obs).reshape(1, -1)
             if self.gae:
-                advantages = torch.zeros_like(self.rewards).to(self.device)
+                advantages = torch.zeros_like(rewards).to(self.device)
                 lastgaelam = 0
                 for t in reversed(range(self.steps_per_batch)):
                     nextvalues = (
-                        next_value
-                        if t == self.steps_per_batch - 1
-                        else self.values[t + 1]
+                        next_value if t == self.steps_per_batch - 1 else values[t + 1]
                     )
-                    nextnonterminal = 1.0 - self.dones[t]
+                    nextnonterminal = 1.0 - dones[t]
                     delta = (
-                        self.rewards[t]
+                        rewards[t]
                         + self.gamma * nextvalues * nextnonterminal
-                        - self.values[t]
+                        - values[t]
                     )
                     advantages[t] = lastgaelam = (
                         delta
                         + self.gamma * self.gae_lambda * nextnonterminal * lastgaelam
                     )
-                returns = advantages + self.values
+                returns = advantages + values
             else:
-                returns = torch.zeros_like(self.rewards).to(self.device)
+                returns = torch.zeros_like(rewards).to(self.device)
                 for t in reversed(range(self.steps_per_batch)):
                     next_return = (
                         next_value if t == self.steps_per_batch - 1 else returns[t + 1]
                     )
-                    nextnonterminal = 1.0 - self.dones[t]
-                    returns[t] = (
-                        self.rewards[t] + self.gamma * nextnonterminal * next_return
-                    )
-                advantages = returns - self.values
+                    nextnonterminal = 1.0 - dones[t]
+                    returns[t] = rewards[t] + self.gamma * nextnonterminal * next_return
+                advantages = returns - values
 
         # flatten the batch
-        b_legal_actions_mask = self.legal_actions_mask.reshape((-1, self.num_actions))
-        b_obs = self.obs.reshape((-1,) + self.input_shape)
-        b_logprobs = self.logprobs.reshape(-1)
-        b_actions = self.actions.reshape(-1)
+        b_legal_actions_mask = legal_actions_masks.reshape((-1, self.num_actions))
+        b_obs = obs.reshape((-1,) + self.input_shape)
+        b_logprobs = logprobs.reshape(-1)
+        b_actions = actions.reshape(-1)
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
-        b_values = self.values.reshape(-1)
+        b_values = values.reshape(-1)
 
         # Optimizing the policy and value network
         b_inds = np.arange(self.batch_size)
@@ -360,7 +450,6 @@ class PPO(nn.Module):
                 ratio = logratio.exp()
 
                 with torch.no_grad():
-                    # calculate approx_kl http://joschu.net/blog/kl-approx.html
                     old_approx_kl = (-logratio).mean()
                     approx_kl = ((ratio - 1) - logratio).mean()
                     clipfracs += [
@@ -411,50 +500,38 @@ class PPO(nn.Module):
                 if approx_kl > self.target_kl:
                     break
 
-        y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
-        var_y = np.var(y_true)
-        explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
-
-        # TRY NOT TO MODIFY: record rewards for plotting purposes
+        # Logging
         if self.writer is not None:
+            y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
+            var_y = np.var(y_true)
+            explained_var = (
+                np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
+            )
+
             self.writer.add_scalar(
-                "charts/learning_rate",
-                self.optimizer.param_groups[0]["lr"],
+                f"losses/value_loss_p{player_id}", v_loss.item(), self.total_steps_done
+            )
+            self.writer.add_scalar(
+                f"losses/policy_loss_p{player_id}",
+                pg_loss.item(),
                 self.total_steps_done,
             )
             self.writer.add_scalar(
-                "losses/value_loss", v_loss.item(), self.total_steps_done
+                f"losses/entropy_p{player_id}",
+                entropy_loss.item(),
+                self.total_steps_done,
             )
             self.writer.add_scalar(
-                "losses/policy_loss", pg_loss.item(), self.total_steps_done
-            )
-            self.writer.add_scalar(
-                "losses/entropy", entropy_loss.item(), self.total_steps_done
-            )
-            self.writer.add_scalar(
-                "losses/old_approx_kl", old_approx_kl.item(), self.total_steps_done
-            )
-            self.writer.add_scalar(
-                "losses/approx_kl", approx_kl.item(), self.total_steps_done
-            )
-            self.writer.add_scalar(
-                "losses/clipfrac", np.mean(clipfracs), self.total_steps_done
-            )
-            self.writer.add_scalar(
-                "losses/explained_variance", explained_var, self.total_steps_done
-            )
-            self.writer.add_scalar(
-                "charts/SPS",
-                int(self.total_steps_done / (time.time() - self.start_time)),
+                f"losses/explained_variance_p{player_id}",
+                explained_var,
                 self.total_steps_done,
             )
 
-        # Update counters
+        # Reset buffer index for this player
         self.updates_done += 1
-        self.cur_batch_idx = 0
+        self.cur_batch_idx[player_id] = 0
 
     def anneal_learning_rate(self, update, num_total_updates):
-        # Annealing the rate
         frac = 1.0 - (update / num_total_updates)
         if frac <= 0:
             raise ValueError("Annealing learning rate to <= 0")

@@ -15,7 +15,7 @@ import copy
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tqdm import trange
-from open_spiel.python.games.tic_tac_toe import TicTacToeGame
+from game.tictactoe import TicTacToeGame
 import numpy as np
 from open_spiel.python import rl_environment
 from open_spiel.python.rl_environment import Environment, ChanceEventSampler
@@ -113,7 +113,7 @@ def main():
     # Create TWO separate PPO agents
     agents = [
         PPO(
-            input_shape=info_state_shape,
+            input_shape=(info_state_shape,),
             num_actions=num_actions,
             num_players=num_players,
             player_id=player_id,
