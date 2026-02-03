@@ -3,6 +3,31 @@ from open_spiel.python import rl_agent
 import copy
 
 
+def clone_dqn_agent(agent):
+    """Create a clone of a DQN agent without using deepcopy.
+
+    This avoids the RuntimeError that occurs when deepcopying PyTorch
+    tensors with autograd history.
+    """
+    # Use stored kwargs to create a new instance with same hyperparameters
+    kwargs = agent._kwargs.copy()
+    # Remove 'self' from kwargs as it was captured by locals()
+    kwargs.pop("self", None)
+
+    # Create new agent instance
+    agent_class = type(agent)
+    new_agent = agent_class(**kwargs)
+
+    # Copy network weights
+    new_agent._q_network.load_state_dict(agent._q_network.state_dict())
+    new_agent._target_q_network.load_state_dict(agent._target_q_network.state_dict())
+
+    # Copy iteration counter
+    new_agent._iteration = agent._iteration
+
+    return new_agent
+
+
 class HistoricalOpponentPool:
     """Maintains a pool of past agent snapshots for training."""
 
@@ -12,7 +37,11 @@ class HistoricalOpponentPool:
 
     def add_snapshot(self, agent: rl_agent):
         """Add a copy of the current agent to the pool."""
-        snapshot = copy.deepcopy(agent)
+        # Use clone_dqn_agent for PyTorch-based agents to avoid deepcopy issues
+        if hasattr(agent, "_kwargs") and hasattr(agent, "_q_network"):
+            snapshot = clone_dqn_agent(agent)
+        else:
+            snapshot = copy.deepcopy(agent)
         snapshot.eval()
         if len(self.pool) >= self.max_size:
             self.pool.pop(0)
@@ -26,4 +55,3 @@ class HistoricalOpponentPool:
 
     def __len__(self):
         return len(self.pool)
-
