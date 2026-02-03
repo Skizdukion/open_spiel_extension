@@ -1,5 +1,5 @@
 --extra-index-url https://download.pytorch.org/whl/cu121
 torch
-open_spiel=1.6.11
+open_spiel==1.6.11
 dm-tree
 tqdm

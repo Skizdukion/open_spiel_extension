@@ -7,24 +7,19 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tqdm import trange
-from game.tictactoe import TicTacToeGame, TicTacToeState
+from game.tictactoe import TicTacToeGame
+from util.eval import EvalAgainstRandomBot, EvalAgainstOtherAgents
+from util.exploit_calculation import DQNPoliciesEvaluate
 import numpy as np
 import random
 from open_spiel.python import rl_environment
 from open_spiel.python.algorithms import random_agent
 from open_spiel.python.algorithms import tabular_qlearner
-import logging
-
+from util.setup_log import setup_log
 from algorithms.dqn import DQN
+from open_spiel.python.algorithms import exploitability
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.FileHandler("app.log", mode="a"),
-        logging.StreamHandler(),  # Console output
-    ],
-)
+logging = setup_log()
 
 
 def pretty_board(time_step: rl_environment.TimeStep) -> np.ndarray:
@@ -86,8 +81,6 @@ def main():
     state_size = env.observation_spec()["info_state"][0]
     num_actions = env.action_spec()["num_actions"]
 
-    num_players = 2
-
     hidden_layers_sizes = [32, 32]
     replay_buffer_capacity = int(1e4)
     train_episodes = 100000
@@ -143,97 +136,30 @@ def main():
         for agent in agents:
             agent.step(time_step)
 
-    # Final Evaluation
-    print("\n" + "=" * 60)
-    print("FINAL EVALUATION")
-    print("=" * 60)
+    random_bot_eval = EvalAgainstRandomBot(env, agents, 1000)
 
-    random_agents = [
-        random_agent.RandomAgent(player_id=idx, num_actions=num_actions)
-        for idx in range(num_players)
-    ]
-    r_mean = eval_against_random_bots(env, agents, random_agents, 1000)
-    print(f"\nWin rate vs random: P0={r_mean[0]:.3f}, P1={r_mean[1]:.3f}")
-    logging.info("Mean episode rewards: %s", r_mean)
+    wins, loses, draws = random_bot_eval.run_eval()
 
-    # Stochastic evaluation (sample from action probabilities)
-    print("\nDQN vs DQN (1000 games) Stochastic:")
-    p0_wins = p1_wins = draws = 0
-    for _ in range(1000):
-        time_step = env.reset()
-        while not time_step.last():
-            player_id = time_step.observations["current_player"]
-            # Get action probs and sample (stochastic)
-            agent_output = agents[player_id].step(time_step, is_evaluation=True)
-            # Sample from probs instead of using argmax action
-            action = np.random.choice(len(agent_output.probs), p=agent_output.probs)
-            time_step = env.step([action])
-        if time_step.rewards[0] > 0:
-            p0_wins += 1
-        elif time_step.rewards[1] > 0:
-            p1_wins += 1
-        else:
-            draws += 1
-    print(f"P0 wins: {p0_wins}, P1 wins: {p1_wins}, Draws: {draws}")
+    logging.info("Against random agent ----------------------")
+    for idx, _ in enumerate(wins):
+        logging.info(
+            f"P{idx} Win: {wins[idx]}, Lose: {loses[idx]}, Draw: {draws[idx]}"
+        )
+
+    others_agent_eval = EvalAgainstOtherAgents(env, agents, 1000)
+
+    wins, loses, draws = others_agent_eval.run_eval(agents)
+
+    logging.info("Against others agent ----------------------")
+    for idx, _ in enumerate(wins):
+        logging.info(
+            f"P{idx} Win: {wins[idx]}, Lose: {loses[idx]}, Draw: {draws[idx]}"
+        )
+
+    policies = DQNPoliciesEvaluate(env, agents)
+
+    expl = exploitability.exploitability(env.game, policies)
+    logging.info("Exploitability AVG %s", expl)
 
 
 main()
-
-# tictactoe = TicTacToeGame()
-
-# state = tictactoe.new_initial_state()
-
-# # Print the initial state
-# print(str(state))
-
-# while not state.is_terminal():
-#     # The state can be three different types: chance node,
-#     # simultaneous node, or decision node
-#     if state.is_chance_node():
-#         # Chance node: sample an outcome
-#         outcomes = state.chance_outcomes()
-#         num_actions = len(outcomes)
-#         print("Chance node, got " + str(num_actions) + " outcomes")
-#         action_list, prob_list = zip(*outcomes)
-#         action = np.random.choice(action_list, p=prob_list)
-#         print(
-#             "Sampled outcome: ", state.action_to_string(state.current_player(), action)
-#         )
-#         state.apply_action(action)
-
-#     elif state.is_simultaneous_node():
-#         # Simultaneous node: sample actions for all players.
-
-#         def random_choice(a):
-#             return np.random.choice(a) if a else [0]
-
-#         chosen_actions = [
-#             random_choice(state.legal_actions(pid))
-#             for pid in range(tictactoe.num_players())
-#         ]
-#         print(
-#             "Chosen actions: ",
-#             [
-#                 state.action_to_string(pid, action)
-#                 for pid, action in enumerate(chosen_actions)
-#             ],
-#         )
-#         state.apply_actions(chosen_actions)
-#     else:
-#         # Decision node: sample action for the single current player
-#         action = random.choice(state.legal_actions(state.current_player()))
-#         action_string = state.action_to_string(state.current_player(), action)
-#         print(
-#             "Player ",
-#             state.current_player(),
-#             ", randomly sampled action: ",
-#             action_string,
-#         )
-#         state.apply_action(action)
-
-#     print(str(state))
-
-# # Game is now done. Print utilities for each player
-# returns = state.returns()
-# for pid in range(tictactoe.num_players()):
-#     print("Utility for player {} is {}".format(pid, returns[pid]))

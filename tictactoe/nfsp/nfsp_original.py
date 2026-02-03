@@ -6,106 +6,109 @@ sys.path.insert(
     0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
 
-from absl import app
-from absl import flags
-from absl import logging
 from tqdm import trange
 
-from open_spiel.python import policy
 from open_spiel.python import rl_environment
 from open_spiel.python.algorithms import exploitability
 from algorithms import nfsp
+from util.exploit_calculation import NSFPPoliciesEvaluate
+from util.eval import EvalAgainstRandomBot, EvalAgainstOtherAgents
+from util.setup_log import setup_log
 
-FLAGS = flags.FLAGS
+logging = setup_log()
 
-flags.DEFINE_integer("num_train_episodes", int(3e6), "Number of training episodes.")
-flags.DEFINE_integer(
-    "eval_every", 10000, "Episode frequency at which the agents are evaluated."
-)
-flags.DEFINE_list(
-    "hidden_layers_sizes",
-    [
-        128,
-    ],
-    "Number of hidden units in the avg-net and Q-net.",
-)
-flags.DEFINE_integer("replay_buffer_capacity", int(2e5), "Size of the replay buffer.")
-flags.DEFINE_integer(
-    "reservoir_buffer_capacity", int(2e6), "Size of the reservoir buffer."
-)
-flags.DEFINE_float(
-    "anticipatory_param", 0.1, "Prob of using the rl best response as episode policy."
-)
+# ============== Configuration ==============
+NUM_TRAIN_EPISODES = int(3e6)
+EVAL_EVERY = 100000
+HIDDEN_LAYERS_SIZES = [128]
+REPLAY_BUFFER_CAPACITY = int(2e5)
+RESERVOIR_BUFFER_CAPACITY = int(2e6)
+ANTICIPATORY_PARAM = 0.05
+CHECKPOINT_DIR = "checkpoints/nfsp_tictactoe"
+SAVE_EVERY = 100000
+LOAD_CHECKPOINT = None  # e.g., "checkpoints/nfsp_tictactoe/ep_100000"
+# ===========================================
 
 
-class NFSPPolicies(policy.Policy):
-    """Joint policy to be evaluated."""
-
-    def __init__(self, env, nfsp_policies, mode):
-        game = env.game
-        player_ids = [0, 1]
-        super(NFSPPolicies, self).__init__(game, player_ids)
-        self._policies = nfsp_policies
-        self._mode = mode
-        self._obs = {"info_state": [None, None], "legal_actions": [None, None]}
-
-    def action_probabilities(self, state, player_id=None):
-        cur_player = state.current_player()
-        legal_actions = state.legal_actions(cur_player)
-
-        self._obs["current_player"] = cur_player
-        self._obs["info_state"][cur_player] = state.information_state_tensor(cur_player)
-        self._obs["legal_actions"][cur_player] = legal_actions
-
-        info_state = rl_environment.TimeStep(
-            observations=self._obs, rewards=None, discounts=None, step_type=None
-        )
-
-        with self._policies[cur_player].temp_mode_as(self._mode):
-            p = self._policies[cur_player].step(info_state, is_evaluation=True).probs
-        prob_dict = {action: p[action] for action in legal_actions}
-        return prob_dict
+def save_checkpoint(agents, checkpoint_dir, episode):
+    """Save all agents to checkpoint."""
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    checkpoint_path = os.path.join(checkpoint_dir, f"ep_{episode}")
+    for idx, agent in enumerate(agents):
+        agent.save(f"{checkpoint_path}_agent{idx}")
+    logging.info(f"Checkpoint saved at episode {episode}")
 
 
-def main(unused_argv):
-    game = "kuhn_poker"
+def load_checkpoint(agents, checkpoint_path):
+    """Load all agents from checkpoint."""
+    import pathlib
+
+    for idx, agent in enumerate(agents):
+        agent.restore(pathlib.Path(f"{checkpoint_path}_agent{idx}"))
+    logging.info(f"Checkpoint loaded from {checkpoint_path}")
+
+
+def main():
+    game = "tic_tac_toe"
     num_players = 2
 
-    env_configs = {"players": num_players}
-    env = rl_environment.Environment(game, **env_configs)
+    env = rl_environment.Environment(game)
     info_state_size = env.observation_spec()["info_state"][0]
     num_actions = env.action_spec()["num_actions"]
 
-    hidden_layers_sizes = [int(s) for s in FLAGS.hidden_layers_sizes]
     kwargs = {
-        "replay_buffer_capacity": FLAGS.replay_buffer_capacity,
-        "epsilon_decay_duration": FLAGS.num_train_episodes,
-        "epsilon_start": 0.06,
-        "epsilon_end": 0.001,
+        "replay_buffer_capacity": REPLAY_BUFFER_CAPACITY,
+        "epsilon_decay_duration": NUM_TRAIN_EPISODES,
+        "epsilon_start": 0.5,
+        "epsilon_end": 0.1,
     }
 
-    # pylint: disable=g-complex-comprehension
     agents = [
         nfsp.NFSP(
             idx,
             info_state_size,
             num_actions,
-            hidden_layers_sizes,
-            FLAGS.reservoir_buffer_capacity,
-            FLAGS.anticipatory_param,
-            **kwargs
+            HIDDEN_LAYERS_SIZES,
+            RESERVOIR_BUFFER_CAPACITY,
+            ANTICIPATORY_PARAM,
+            **kwargs,
         )
         for idx in range(num_players)
     ]
-    expl_policies_avg = NFSPPolicies(env, agents, nfsp.MODE.AVERAGE_POLICY)
+    expl_policies_avg = NSFPPoliciesEvaluate(env, agents, nfsp.MODE.AVERAGE_POLICY)
 
-    for ep in trange(FLAGS.num_train_episodes):
-        if (ep + 1) % FLAGS.eval_every == 0:
+    # Load checkpoint if specified
+    if LOAD_CHECKPOINT:
+        load_checkpoint(agents, LOAD_CHECKPOINT)
+
+    random_bot_eval = EvalAgainstRandomBot(env, agents, 1000)
+    others_agent_eval = EvalAgainstOtherAgents(env, agents, 1000)
+
+    for ep in trange(NUM_TRAIN_EPISODES):
+        if (ep + 1) % EVAL_EVERY == 0:
             losses = [agent.loss for agent in agents]
             logging.info("Losses: %s", losses)
             expl = exploitability.exploitability(env.game, expl_policies_avg)
             logging.info("[%s] Exploitability AVG %s", ep + 1, expl)
+
+            wins, loses, draws = random_bot_eval.run_eval()
+            logging.info("Against random agent ----------------------")
+            for idx, _ in enumerate(wins):
+                logging.info(
+                    f"P{idx} Win: {wins[idx]}, Lose: {loses[idx]}, Draw: {draws[idx]}"
+                )
+
+            wins, loses, draws = others_agent_eval.run_eval(agents)
+            logging.info("Against others agent ----------------------")
+            for idx, _ in enumerate(wins):
+                logging.info(
+                    f"P{idx} Win: {wins[idx]}, Lose: {loses[idx]}, Draw: {draws[idx]}"
+                )
             logging.info("_____________________________________________")
+
+        # Save checkpoint
+        if (ep + 1) % SAVE_EVERY == 0:
+            save_checkpoint(agents, CHECKPOINT_DIR, ep + 1)
 
         time_step = env.reset()
         while not time_step.last():
@@ -120,4 +123,4 @@ def main(unused_argv):
 
 
 if __name__ == "__main__":
-    app.run(main)
+    main()
