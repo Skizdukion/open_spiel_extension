@@ -1,5 +1,3 @@
-from typing import List
-import importlib.util
 import os
 import sys
 
@@ -10,68 +8,12 @@ from tqdm import trange
 from game.tictactoe import TicTacToeGame
 from util.eval import EvalAgainstRandomBot, EvalAgainstOtherAgents
 from util.exploit_calculation import DQNPoliciesEvaluate
-import numpy as np
-import random
 from open_spiel.python import rl_environment
-from open_spiel.python.algorithms import random_agent
-from open_spiel.python.algorithms import tabular_qlearner
 from util.setup_log import setup_log
 from algorithms.dqn import DQN
 from open_spiel.python.algorithms import exploitability
 
 logging = setup_log()
-
-
-def pretty_board(time_step: rl_environment.TimeStep) -> np.ndarray:
-    """Returns the board in `time_step` in a human readable format."""
-    info_state = time_step.observations["info_state"][0]
-    x_locations = np.nonzero(info_state[9:18])[0]
-    o_locations = np.nonzero(info_state[18:])[0]
-    board = np.full(3 * 3, ".")
-    board[x_locations] = "X"
-    board[o_locations] = "0"
-    board = np.reshape(board, (3, 3))
-    return board
-
-
-def command_line_action(time_step: rl_environment.TimeStep) -> int:
-    """Gets a valid action from the user on the command line."""
-    current_player = time_step.observations["current_player"]
-    legal_actions = time_step.observations["legal_actions"][current_player]
-    action = -1
-    while action not in legal_actions:
-        print("Choose an action from {}:".format(legal_actions))
-        sys.stdout.flush()
-        action_str = input()
-        try:
-            action = int(action_str)
-        except ValueError:
-            continue
-    return action
-
-
-def eval_against_random_bots(
-    env: rl_environment.Environment,
-    trained_agents: List[tabular_qlearner.QLearner],
-    random_agents: List[random_agent.RandomAgent],
-    num_episodes: int,
-) -> np.ndarray:
-    """Evaluates `trained_agents` against `random_agents` for `num_episodes`."""
-    wins = np.zeros(2)
-    for player_pos in range(2):
-        if player_pos == 0:
-            cur_agents = [trained_agents[0], random_agents[1]]
-        else:
-            cur_agents = [random_agents[0], trained_agents[1]]
-        for _ in range(num_episodes):
-            time_step = env.reset()
-            while not time_step.last():
-                player_id = time_step.observations["current_player"]
-                agent_output = cur_agents[player_id].step(time_step, is_evaluation=True)
-                time_step = env.step([agent_output.action])
-            if time_step.rewards[player_pos] > 0:
-                wins[player_pos] += 1
-    return wins / num_episodes
 
 
 def main():

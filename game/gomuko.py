@@ -33,10 +33,10 @@ from open_spiel.python.observation import IIGObserverForPublicInfoGame
 import pyspiel
 
 _NUM_PLAYERS = 2
-_NUM_ROWS = 16
-_NUM_COLS = 16
+_NUM_ROWS = 7
+_NUM_COLS = 7
 _NUM_CELLS = _NUM_ROWS * _NUM_COLS
-_WIN_SIZE = 5
+_WIN_SIZE = 4
 
 _GAME_TYPE = pyspiel.GameType(
     short_name="python_gomuko",

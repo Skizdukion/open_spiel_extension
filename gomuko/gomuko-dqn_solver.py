@@ -1,4 +1,3 @@
-from typing import List
 import os
 import sys
 
@@ -7,65 +6,59 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tqdm import trange
 from game.gomuko import GomukoGame
-import numpy as np
-from open_spiel.python import rl_environment
-from open_spiel.python.algorithms import random_agent
-from open_spiel.python.algorithms import tabular_qlearner
-import logging
-
+from util.eval import EvalAgainstRandomBot, EvalAgainstOtherAgents
+from open_spiel.python import rl_environment, rl_agent
+from util.setup_log import setup_log
+from util.opponent_pool import HistoricalOpponentPool
 from algorithms.dqn import DQN
+import numpy as np
+from open_spiel.python.algorithms import random_agent
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.FileHandler("app.log", mode="a"),
-        logging.StreamHandler(),  # Console output
-    ],
-)
+logging = setup_log()
 
 
-def eval_against_random_bots(
-    env: rl_environment.Environment,
-    trained_agents: List[tabular_qlearner.QLearner],
-    random_agents: List[random_agent.RandomAgent],
-    num_episodes: int,
-) -> np.ndarray:
-    """Evaluates `trained_agents` against `random_agents` for `num_episodes`."""
-    wins = np.zeros(2)
-    for player_pos in range(2):
-        if player_pos == 0:
-            cur_agents = [trained_agents[0], random_agents[1]]
-        else:
-            cur_agents = [random_agents[0], trained_agents[1]]
-        for _ in range(num_episodes):
-            time_step = env.reset()
-            while not time_step.last():
-                player_id = time_step.observations["current_player"]
-                agent_output = cur_agents[player_id].step(time_step, is_evaluation=True)
-                time_step = env.step([agent_output.action])
-            if time_step.rewards[player_pos] > 0:
-                wins[player_pos] += 1
-    return wins / num_episodes
+def sample_agent(
+    dqn_agents: list[rl_agent],
+    opponent_pools: list[HistoricalOpponentPool],
+    random_agents: list[random_agent.RandomAgent],
+    self_play_prob=0.6,
+    his_prob=0.35,
+):
+    roll = np.random.random()
+    game_agents = [dqn_agents[0], dqn_agents[1]]
+
+    if roll < self_play_prob:
+        return game_agents
+
+    training_player = np.random.randint(0, 2)
+    opponent_player = 1 - training_player
+
+    if roll < self_play_prob + his_prob and len(opponent_pools[opponent_player]) > 0:
+        game_agents[opponent_player] = opponent_pools[opponent_player].sample_opponent()
+    else:
+
+        game_agents[opponent_player] = random_agents[opponent_player]
+
+    return game_agents
 
 
 def main():
-    gomuko = GomukoGame()
+    tictactoe = GomukoGame()
 
-    env = rl_environment.Environment(gomuko)
+    num_players = 2
+    env = rl_environment.Environment(tictactoe)
     state_size = env.observation_spec()["info_state"][0]
     num_actions = env.action_spec()["num_actions"]
 
-    num_players = 2
+    hidden_layers_sizes = [128, 128]
+    replay_buffer_capacity = int(3e6)
+    train_episodes = int(1e6)
+    loss_report_interval = int(2e4)
+    save_model_interval = int(2e5)
+    eval_interval = int(1e5)
+    snappot_opp_interval = int(1e5)
 
-    hidden_layers_sizes = [256, 256]
-    replay_buffer_capacity = int(1e6)
-    train_episodes = 200000
-    loss_report_interval = 1000
-    save_model_interval = 10000
-    eval_interval = 10000
-
-    agents = [
+    dqn_agents = [
         DQN(
             player_id=0,
             state_representation_size=state_size,
@@ -76,7 +69,8 @@ def main():
             gradient_clipping=1.0,
             learning_rate=0.001,
             learn_every=100,
-            device="cuda",
+            optimizer_str="adam",
+            # device="cuda",
         ),
         DQN(
             player_id=1,
@@ -88,7 +82,8 @@ def main():
             gradient_clipping=1.0,
             learning_rate=0.001,
             learn_every=100,
-            device="cuda",
+            optimizer_str="adam",
+            # device="cuda",
         ),
     ]
 
@@ -97,69 +92,68 @@ def main():
         for idx in range(num_players)
     ]
 
-    best_winrate = 0.0
+    random_bot_eval = EvalAgainstRandomBot(env, dqn_agents, 1000)
+    others_agent_eval = EvalAgainstOtherAgents(env, dqn_agents, 1000)
+
+    opponent_pools = [HistoricalOpponentPool(max_size=10) for _ in range(num_players)]
 
     for ep in trange(train_episodes):
-        # Periodic evaluation
-        if ep and ep % eval_interval == 0:
-            # Agent vs Random
-            r_mean = eval_against_random_bots(env, agents, random_agents, 100)
-            avg_winrate = (r_mean[0] + r_mean[1]) / 2
-            improved = " (NEW BEST!)" if avg_winrate > best_winrate else ""
-            if avg_winrate > best_winrate:
-                best_winrate = avg_winrate
-
-            # Agent vs Agent (stochastic)
-            p0_wins = p1_wins = draws = 0
-            for _ in range(100):
-                time_step = env.reset()
-                while not time_step.last():
-                    player_id = time_step.observations["current_player"]
-                    agent_output = agents[player_id].step(time_step, is_evaluation=True)
-                    action = np.random.choice(
-                        len(agent_output.probs), p=agent_output.probs
-                    )
-                    time_step = env.step([action])
-                if time_step.rewards[0] > 0:
-                    p0_wins += 1
-                elif time_step.rewards[1] > 0:
-                    p1_wins += 1
-                else:
-                    draws += 1
-
-            logging.info(
-                f"\n[Ep {ep}] WR vs Random: P0={r_mean[0]:.3f}, P1={r_mean[1]:.3f}, Avg={avg_winrate:.3f}{improved}"
-            )
-            logging.info(f"  DQN vs DQN: P0={p0_wins}, P1={p1_wins}, Draws={draws}")
-            logging.info(
-                "[%s] WR vs Random: P0=%.3f, P1=%.3f", ep, r_mean[0], r_mean[1]
-            )
-
         if ep and ep % loss_report_interval == 0:
-            # Log loss and Q-value magnitude
-            q1 = agents[0].q_values
-            q2 = agents[1].q_values
+            q1 = dqn_agents[0].q_values
+            q2 = dqn_agents[1].q_values
             q1_mean = q1.mean().item() if q1 is not None else 0
             q2_mean = q2.mean().item() if q2 is not None else 0
             logging.info(
-                f"  Loss: P0={agents[0].loss:.4f}, P1={agents[1].loss:.4f} | Q-mean: P0={q1_mean:.4f}, P1={q2_mean:.4f}"
+                "[%s/%s] DQN 1 loss: %s, Q-mean: %.4f",
+                ep,
+                train_episodes,
+                dqn_agents[0].loss,
+                q1_mean,
+            )
+            logging.info(
+                "[%s/%s] DQN 2 loss: %s, Q-mean: %.4f",
+                ep,
+                train_episodes,
+                dqn_agents[1].loss,
+                q2_mean,
             )
 
+        if ep and ep % eval_interval == 0:
+            logging.info("Against random agent ----------------------")
+            wins, loses, draws = random_bot_eval.run_eval()
+            for idx, _ in enumerate(wins):
+                logging.info(
+                    f"P{idx} Win: {wins[idx]}, Lose: {loses[idx]}, Draw: {draws[idx]}"
+                )
+
+            wins, loses, draws = others_agent_eval.run_eval(dqn_agents)
+            logging.info("Against others agent ----------------------")
+            for idx, _ in enumerate(wins):
+                logging.info(
+                    f"P{idx} Win: {wins[idx]}, Lose: {loses[idx]}, Draw: {draws[idx]}"
+                )
+
         if ep and ep % save_model_interval == 0:
-            agents[0].save(f"gomuko/checkpoints/agent_{0}_checkpoint_{ep}.pt")
-            agents[1].save(f"gomuko/checkpoints/agent_{1}_checkpoint_{ep}.pt")
+            dqn_agents[0].save(f"gomuko/checkpoints/dqn_agent_{0}_checkpoint_{ep}.pt")
+            dqn_agents[1].save(f"gomuko/checkpoints/dqn_agent_{1}_checkpoint_{ep}.pt")
             logging.info(f"  Models saved at episode {ep}")
+
+        if ep > 0 and ep % snappot_opp_interval == 0:
+            for player_id in range(num_players):
+                opponent_pools[player_id].add_snapshot(dqn_agents[player_id])
 
         time_step = env.reset()
 
+        cur_agents = sample_agent(dqn_agents, opponent_pools, random_agents)
+
         while not time_step.last():
             player_id = time_step.observations["current_player"]
-            agent_output = agents[player_id].step(time_step)
+            agent_output = cur_agents[player_id].step(time_step)
             action_list = [agent_output.action]
             time_step = env.step(action_list)
 
         # Episode is over, step all agents with final info state.
-        for agent in agents:
+        for agent in dqn_agents:
             agent.step(time_step)
 
 

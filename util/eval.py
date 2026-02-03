@@ -2,7 +2,6 @@ from open_spiel.python import rl_environment, rl_agent
 from open_spiel.python.algorithms import random_agent
 import numpy as np
 
-
 def run_simulation(agents, player_pos, num_eps, env):
     win = 0
     lose = 0
