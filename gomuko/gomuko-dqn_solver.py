@@ -1,5 +1,6 @@
 import os
 import sys
+import argparse
 
 # Add parent directory to path so we can import from algorithms
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,6 +16,17 @@ import numpy as np
 from open_spiel.python.algorithms import random_agent
 
 logging = setup_log()
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Gomuko DQN Solver")
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=str,
+        default="gomuko/checkpoints",
+        help="Directory to save model checkpoints (default: gomuko/checkpoints)",
+    )
+    return parser.parse_args()
 
 
 def sample_agent(
@@ -42,7 +54,10 @@ def sample_agent(
     return game_agents
 
 
-def main():
+def main(args):
+    checkpoint_dir = args.checkpoint_dir
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
     tictactoe = GomukoGame()
 
     num_players = 2
@@ -134,9 +149,9 @@ def main():
                 )
 
         if ep and ep % save_model_interval == 0:
-            dqn_agents[0].save(f"gomuko/checkpoints/dqn_agent_{0}_checkpoint_{ep}.pt")
-            dqn_agents[1].save(f"gomuko/checkpoints/dqn_agent_{1}_checkpoint_{ep}.pt")
-            logging.info(f"  Models saved at episode {ep}")
+            dqn_agents[0].save(f"{checkpoint_dir}/dqn_agent_{0}_checkpoint_{ep}.pt")
+            dqn_agents[1].save(f"{checkpoint_dir}/dqn_agent_{1}_checkpoint_{ep}.pt")
+            logging.info(f"  Models saved at episode {ep} to {checkpoint_dir}")
 
         if ep > 0 and ep % snappot_opp_interval == 0:
             for player_id in range(num_players):
@@ -157,4 +172,6 @@ def main():
             agent.step(time_step)
 
 
-main()
+if __name__ == "__main__":
+    args = parse_args()
+    main(args)
