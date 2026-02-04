@@ -26,7 +26,7 @@ def main():
     hidden_layers_sizes = [32, 32]
     replay_buffer_capacity = int(1e4)
     train_episodes = 100000
-    loss_report_interval = 1000
+    loss_report_interval = 10000
 
     agents = [
         DQN(
