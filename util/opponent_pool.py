@@ -42,7 +42,14 @@ class HistoricalOpponentPool:
             snapshot = clone_dqn_agent(agent)
         else:
             snapshot = copy.deepcopy(agent)
-        snapshot.eval()
+
+        if hasattr(snapshot, "eval"):
+            snapshot.eval()
+        elif hasattr(snapshot, "_q_network"):
+            snapshot._q_network.eval()
+            if hasattr(snapshot, "_target_q_network"):
+                snapshot._target_q_network.eval()
+                
         if len(self.pool) >= self.max_size:
             self.pool.pop(0)
         self.pool.append(snapshot)
