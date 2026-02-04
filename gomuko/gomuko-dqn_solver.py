@@ -163,7 +163,14 @@ def main(args):
 
         while not time_step.last():
             player_id = time_step.observations["current_player"]
-            agent_output = cur_agents[player_id].step(time_step)
+
+            # Check if the current agent is one of the training agents
+            is_training_agent = cur_agents[player_id] in dqn_agents
+
+            agent_output = cur_agents[player_id].step(
+                time_step, is_evaluation=not is_training_agent
+            )
+
             action_list = [agent_output.action]
             time_step = env.step(action_list)
 

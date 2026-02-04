@@ -2,6 +2,8 @@ import logging
 import os
 import atexit
 import asyncio
+import urllib.request
+import urllib.parse
 from telegram import Bot
 from dotenv import load_dotenv
 
@@ -73,7 +75,21 @@ def setup_log():
         logging.getLogger().addHandler(telegram_handler)
 
         def on_exit():
-            logging.info("Program exited.")
+            # Use urllib to send exit message synchronously to avoid asyncio shutdown issues
+            try:
+                if telegram_token and telegram_chat_id:
+                    url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
+                    data = urllib.parse.urlencode(
+                        {
+                            "chat_id": telegram_chat_id,
+                            "text": f"{logging.getLevelName(logging.INFO)} | Program exited.",
+                            "message_thread_id": telegram_topic_id,
+                        }
+                    ).encode("utf-8")
+                    req = urllib.request.Request(url, data=data)
+                    urllib.request.urlopen(req)
+            except Exception as e:
+                print(f"Failed to send exit log: {e}")
 
         atexit.register(on_exit)
 
